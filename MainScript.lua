@@ -199,9 +199,7 @@ local function startTeleport(job)
     end)
 
     local ok, err = pcall(function()
-        game:GetService("ExperienceService"):LaunchExperience({
-        placeId = job.place_id,
-    })
+        TeleportService:Teleport(job.place_id, Players.LocalPlayer)
     end)
     if not ok then
         pcall(delfile, PENDING_FILE)
