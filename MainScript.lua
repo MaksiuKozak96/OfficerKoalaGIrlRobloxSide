@@ -58,32 +58,68 @@ local function readStable(path)
     return data
 end
 
-local function uploadToLitterbox(path, data)
+-- Build a multipart/form-data body
+local function buildMultipart(fields, fileField, name, data)
     local boundary = "KoalaBoundary" .. os.time() .. math.random(1000, 9999)
-    local name = (path:match("[^/\\]+$") or "save.rbxl"):gsub("[^%w%._%-]", "_")
-
-    local body = table.concat({
-        "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"reqtype\"\r\n\r\nfileupload\r\n",
-        "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"time\"\r\n\r\n72h\r\n",
-        "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"fileToUpload\"; filename=\"" .. name .. "\"\r\nContent-Type: application/octet-stream\r\n\r\n",
-        data,
-        "\r\n--" .. boundary .. "--\r\n",
-    })
-
-    local ok, response = pcall(request, {
-        Url = "https://litterbox.catbox.moe/resources/internals/api.php",
-        Method = "POST",
-        Headers = {
-            ["Content-Type"] = "multipart/form-data; boundary=" .. boundary,
-        },
-        Body = body,
-    })
-
-    if not ok then return nil, tostring(response) end
-    if response.Success and response.Body:match("^https?://") then
-        return response.Body:gsub("%s+", "")
+    local parts = {}
+    for k, v in pairs(fields) do
+        parts[#parts + 1] = "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"" .. k .. "\"\r\n\r\n" .. v .. "\r\n"
     end
-    return nil, "HTTP " .. tostring(response.StatusCode) .. " " .. tostring(response.Body):sub(1, 100)
+    parts[#parts + 1] = "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"" .. fileField .. "\"; filename=\"" .. name .. "\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    parts[#parts + 1] = data
+    parts[#parts + 1] = "\r\n--" .. boundary .. "--\r\n"
+    return table.concat(parts), boundary
+end
+
+-- Upload hosts, tried in order. If one fails (e.g. DNS error 12007), the next is tried.
+local HOSTS = {
+    {
+        name = "litterbox",
+        url = "https://litterbox.catbox.moe/resources/internals/api.php",
+        field = "fileToUpload",
+        extra = { reqtype = "fileupload", time = "72h" },
+    },
+    {
+        name = "uguu",
+        url = "https://uguu.se/upload?output=text",
+        field = "files[]",
+        extra = {},
+    },
+    {
+        name = "0x0",
+        url = "https://0x0.st",
+        field = "file",
+        extra = {},
+    },
+}
+
+-- Returns url, hostName  OR  nil, errorString
+local function uploadFile(path, data)
+    local name = (path:match("[^/\\]+$") or "save.rbxl"):gsub("[^%w%._%-]", "_")
+    local errors = {}
+
+    for _, host in ipairs(HOSTS) do
+        local body, boundary = buildMultipart(host.extra, host.field, name, data)
+        local ok, res = pcall(request, {
+            Url = host.url,
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "multipart/form-data; boundary=" .. boundary,
+                ["User-Agent"] = "KoalaBot/1.0",
+            },
+            Body = body,
+        })
+
+        if not ok then
+            errors[#errors + 1] = host.name .. ": " .. tostring(res)
+        elseif res.Success and tostring(res.Body):match("^%s*https?://") then
+            return (res.Body:gsub("%s+", "")), host.name
+        else
+            errors[#errors + 1] = host.name .. ": HTTP " .. tostring(res.StatusCode) .. " " .. tostring(res.Body):sub(1, 80)
+        end
+    end
+
+    return nil, table.concat(errors, " | ")
 end
 
 local function handleJob(job)
@@ -125,14 +161,16 @@ local function handleJob(job)
         local data = readStable(path)
         reply(id, "uploading")
 
-        local url, uploadErr = uploadToLitterbox(path, data)
+        local url, info = uploadFile(path, data)
         data = nil
-        pcall(delfile, path)
 
         if url then
+            -- only delete the file after a SUCCESSFUL upload
+            pcall(delfile, path)
             reply(id, "link", {url = url})
         else
-            reply(id, "error", {message = "upload failed: " .. tostring(uploadErr)})
+            -- keep the file in workspace so nothing is lost
+            reply(id, "error", {message = "upload failed (file kept at " .. path .. "): " .. tostring(info)})
         end
     end)
 
