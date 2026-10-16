@@ -1,138 +1,157 @@
-import json
-import uuid
-import discord
-from discord import app_commands
-from discord.ext import commands
-from urllib.parse import urlparse, parse_qs
-from websockets.asyncio.server import serve
+local HttpService = game:GetService("HttpService")
 
-WS_KEY = "koala-7f3a9c21-b84e-4d6a-91ce-52d0e8a7b3f1"
-PORT = 8765
+local URL = "wss://perhaps-christine-protected-golf.trycloudflare.com/?key=koala-7f3a9c21-b84e-4d6a-91ce-52d0e8a7b3f1"
+local ws = WebSocket.connect(URL)
 
-SAVEINST_SCRIPT = r'''
-local Params = {
-    RepoURL = "https://raw.githubusercontent.com/luau/SynSaveInstance/main/",
-    SSI = "saveinstance",
-}
-local synsaveinstance = loadstring(game:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
-local Options = {
-    RemovePlayerCharacters = false,
-    SafeMode = false,
-    NoScripts = false,
-    IsolatePlayers = true,
-    IsolateLocalPlayer = true,
-}
-synsaveinstance(Options)
-'''
+local function reply(id, status, extra)
+    local payload = extra or {}
+    payload.id = id
+    payload.status = status
+    ws:Send(HttpService:JSONEncode(payload))
+end
 
+-- List every file in the workspace (recursive)
+local function listAll(path, out)
+    out = out or {}
+    local ok, items = pcall(listfiles, path)
+    if not ok or type(items) ~= "table" then return out end
+    for _, item in ipairs(items) do
+        if isfolder(item) then
+            listAll(item, out)
+        else
+            out[item] = true
+        end
+    end
+    return out
+end
 
-def render(job):
-    text = f"Sent to {job['clients']} client(s).\nLink to Download: "
-    if job["links"]:
-        text += "\n".join(job["links"])
-    else:
-        text += job["state"]
-    return text
+local function snapshot()
+    for _, root in ipairs({"", "."}) do
+        local ok, items = pcall(listfiles, root)
+        if ok and type(items) == "table" then
+            return listAll(root)
+        end
+    end
+    return {}
+end
 
+local function findNewFile(before, after)
+    for path in pairs(after) do
+        if not before[path] and path:lower():match("%.rbx[lm]x?$") then
+            return path
+        end
+    end
+end
 
-class Executor(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.clients = set()
-        self.jobs = {}
-        self.server = None
+-- Read the file until its size stops changing
+local function readStable(path)
+    local prevSize = -1
+    local data
+    for _ = 1, 60 do
+        data = readfile(path)
+        if #data == prevSize then
+            return data
+        end
+        prevSize = #data
+        task.wait(4)
+    end
+    return data
+end
 
-    async def cog_load(self):
-        self.server = await serve(self.handler, "127.0.0.1", PORT)
-        print(f"WebSocket server listening on port {PORT}")
+local function uploadToLitterbox(path, data)
+    local boundary = "KoalaBoundary" .. os.time() .. math.random(1000, 9999)
+    local name = (path:match("[^/\\]+$") or "save.rbxl"):gsub("[^%w%._%-]", "_")
 
-    async def cog_unload(self):
-        if self.server:
-            self.server.close()
+    local body = table.concat({
+        "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"reqtype\"\r\n\r\nfileupload\r\n",
+        "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"time\"\r\n\r\n72h\r\n",
+        "--" .. boundary .. "\r\nContent-Disposition: form-data; name=\"fileToUpload\"; filename=\"" .. name .. "\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+        data,
+        "\r\n--" .. boundary .. "--\r\n",
+    })
 
-    async def handler(self, ws):
-        query = parse_qs(urlparse(ws.request.path).query)
-        if query.get("key", [""])[0] != WS_KEY:
-            await ws.close()
+    local ok, response = pcall(request, {
+        Url = "https://litterbox.catbox.moe/resources/internals/api.php",
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "multipart/form-data; boundary=" .. boundary,
+        },
+        Body = body,
+    })
+
+    if not ok then return nil, tostring(response) end
+    if response.Success and response.Body:match("^https?://") then
+        return response.Body:gsub("%s+", "")
+    end
+    return nil, "HTTP " .. tostring(response.StatusCode) .. " " .. tostring(response.Body):sub(1, 100)
+end
+
+local function handleJob(job)
+    local id = job.id
+    local before = job.upload and snapshot() or nil
+
+    local fn, compileErr = loadstring(job.code)
+    if not fn then
+        reply(id, "error", {message = "compile error: " .. tostring(compileErr)})
+        return
+    end
+
+    local ok, runErr = pcall(fn)
+    if not ok then
+        reply(id, "error", {message = "runtime error: " .. tostring(runErr)})
+        return
+    end
+
+    if not job.upload then
+        reply(id, "finished")
+        return
+    end
+
+    reply(id, "saved")
+
+    local ok2, err2 = pcall(function()
+        -- find the new file (wait up to ~30s for it to appear)
+        local path
+        for _ = 1, 15 do
+            path = findNewFile(before, snapshot())
+            if path then break end
+            task.wait(2)
+        end
+        if not path then
+            reply(id, "error", {message = "could not find the saved file"})
             return
+        end
 
-        self.clients.add(ws)
-        print("Client connected")
-        try:
-            async for raw in ws:
-                try:
-                    data = json.loads(raw)
-                except Exception:
-                    print("Client says:", raw)
-                    continue
-                await self.on_client_message(data)
-        finally:
-            self.clients.discard(ws)
-            print("Client disconnected")
+        local data = readStable(path)
+        reply(id, "uploading")
 
-    async def on_client_message(self, data):
-        job = self.jobs.get(data.get("id"))
-        if not job:
-            return
+        local url, uploadErr = uploadToLitterbox(path, data)
+        data = nil
+        pcall(delfile, path)
 
-        status = data.get("status")
-        final = False
+        if url then
+            reply(id, "link", {url = url})
+        else
+            reply(id, "error", {message = "upload failed: " .. tostring(uploadErr)})
+        end
+    end)
 
-        if status == "saved":
-            job["state"] = "Save finished, preparing file..."
-        elif status == "uploading":
-            job["state"] = "Uploading..."
-        elif status == "link":
-            job["links"].append(data.get("url", "???"))
-            final = True
-        elif status == "error":
-            job["state"] = f"Failed ({data.get('message', 'unknown error')})"
-            final = True
-        elif status == "finished":
-            job["state"] = "Done"
-            final = True
+    if not ok2 then
+        reply(id, "error", {message = tostring(err2)})
+    end
+end
 
-        await self.refresh(job, final)
-        if final:
-            self.jobs.pop(job["id"], None)
+ws.OnMessage:Connect(function(message, isBinary)
+    if isBinary then return end
 
-    async def refresh(self, job, final):
-        try:
-            await job["interaction"].edit_original_response(content=render(job))
-        except discord.HTTPException:
-            # Discord only lets us edit the message for 15 minutes.
-            # If it expired, DM the user the result instead.
-            if final:
-                try:
-                    await job["user"].send(render(job))
-                except discord.HTTPException:
-                    pass
+    local ok, job = pcall(function()
+        return HttpService:JSONDecode(message)
+    end)
+    if not ok or type(job) ~= "table" then return end
 
-    @app_commands.command(name="testsaveinst", description="Run saveinstance on the client")
-    @app_commands.allowed_installs(guilds=True, users=True)
-    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    async def testsaveinst(self, interaction: discord.Interaction):
-        if not self.clients:
-            await interaction.response.send_message("No client connected.")
-            return
+    task.spawn(handleJob, job)
+end)
 
-        job_id = uuid.uuid4().hex
-        job = {
-            "id": job_id,
-            "interaction": interaction,
-            "user": interaction.user,
-            "clients": len(self.clients),
-            "links": [],
-            "state": "Pending",
-        }
-        self.jobs[job_id] = job
-
-        payload = json.dumps({"id": job_id, "code": SAVEINST_SCRIPT, "upload": True})
-        for ws in list(self.clients):
-            await ws.send(payload)
-
-        await interaction.response.send_message(render(job))
-
-
-async def setup(bot):
-    await bot.add_cog(Executor(bot))
+ws.OnClose:Connect(function()
+    print("Disconnected, Volt will try to reconnect")
+end)
