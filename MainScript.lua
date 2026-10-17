@@ -83,6 +83,7 @@ local function uploadToLitterbox(path, data)
         Method = "POST",
         Headers = {
             ["Content-Type"] = "multipart/form-data; boundary=" .. boundary,
+            ["User-Agent"] = "Mozilla/5.0",
         },
         Body = body,
     })
