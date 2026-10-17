@@ -2,7 +2,7 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 
-local URL = "wss://perhaps-christine-protected-golf.trycloudflare.com/?key=koala-7f3a9c21-b84e-4d6a-91ce-52d0e8a7b3f1"
+local URL = "wss://management-dans-realtors-develops.trycloudflare.com/?key=koala-7f3a9c21-b84e-4d6a-91ce-52d0e8a7b3f1"
 
 local PENDING_FILE = "koala_pending_job.json"
 local PENDING_MAX_AGE = 600     -- seconds before a pending job is considered stale
