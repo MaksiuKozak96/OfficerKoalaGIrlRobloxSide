@@ -154,14 +154,18 @@ local function runAndUpload(job)
         local data = readStable(path)
         reply(id, "uploading")
 
-        local url, uploadErr = uploadToLitterbox(path, data)
-        data = nil
-        pcall(delfile, path)
+        local url, uploadErr
+        for _ = 1, 3 do
+            url, uploadErr = uploadToLitterbox(path, data)
+            if url then break end
+            task.wait(5)
+        end
 
         if url then
+            pcall(delfile, path)
             reply(id, "link", {url = url})
         else
-            reply(id, "error", {message = "upload failed: " .. tostring(uploadErr)})
+            reply(id, "error", {message = "upload failed after 3 tries (" .. math.floor(#data / 1024 / 1024) .. " MB): " .. tostring(uploadErr)})
         end
     end)
 
